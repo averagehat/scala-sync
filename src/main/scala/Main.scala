@@ -1,11 +1,9 @@
 package bleh
 import com.taskadapter.redmineapi._
-import com.taskadapter.redmineapi.bean.{Issue, IssueFactory}
+import com.taskadapter.redmineapi.bean._
 import caseapp._
 import better.files._
-import java.io.{File => JFile}
-
-import net.jcazevedo.moultingyaml._
+import java.io.{IOError, File => JFile}
 
 import scala.collection.JavaConversions._
 import scala.util.Try
@@ -19,6 +17,8 @@ import Scalaz._
 import kantan.csv.{ParseError, ReadError, RowDecoder}
 import kantan.csv.ops._
 import kantan.csv.generic._
+import net.jcazevedo.moultingyaml.DefaultYamlProtocol
+import net.jcazevedo.moultingyaml._
 // case class decoder derivation
 import kantan.csv.scalaz._
 // monad for result type
@@ -33,7 +33,9 @@ object MyYamlProtocol extends DefaultYamlProtocol {
 }
 // Args
 
-case class PostRunArgs(runDir: String) extends App {
+case class PostRunArgs(runDir: String, runIssue: Int) extends App {
+  // main happens here
+  Bleh.run(PostRunArgs(runDir, runIssue))
 }
 object PostRunApp extends AppOf[PostRunArgs]
 // PostRunApp.main(Seq("--run-dir", "/media/RUNS/foobar").toArray)
@@ -44,6 +46,7 @@ import MyYamlProtocol._
 object Bleh {
   case class SampleSheetRow(sampleId: String, sampleName: Int) // this argOrder matters
     def getSheetRows(ssPath: File): Either[ReadError, List[SampleSheetRow]] = {
+    //def getSheetRows(ssPath: File): ReadError\/List[SampleSheetRow] = {
       val ss = ssPath.contentAsString
       implicit val decoder: RowDecoder[SampleSheetRow] = RowDecoder.ordered(SampleSheetRow.apply _)
       val DATAHEADER = "\\[Data\\]\\s+"
@@ -53,28 +56,50 @@ object Bleh {
         rows <- rawRows.sequenceU
       } yield rows
     }
-  def main(args: Array[String]): Unit = {
-    val cfg = "config.yaml".toFile.contentAsString.parseYaml.convertTo[Config]
-    val ssPath = "/Users/mikep/scala/attemptscala" / "SampleSheet.csv"
-    getSheetRows(ssPath).right.get
+  def eitherToDisjunct[A,B](x: Either[A,B]): A\/B = x match {
+    case Left(x) => \/.left(x)
+    case Right(x) => \/.right(x)
   }
-  type Error = String
-  def uploadSampleSheet(mgr: RedmineManager, args: PostRunArgs, sampleSheet: File) = {
-/*
-val vdbSequencingProject = mgr.getProjectManager.getProjectByKey("vdb sequencing") // throws Redmine...
-//val runIssue = IssueFactory.create(vdbSequencingProject.getId, RUNNAME)
-val runIssue = mgr.getIssueManager.getIssueById(args.runIssue)
-// args.runDir is absolute path
-val sampleSheet = args.runDir/"SampleSheet.csv"
-if (!sampleSheet.exists()) Try(throw new Exception(f"No sample sheet found in directory ${args.runName}"))
-val attachment = mgr.getAttachmentManager.uploadAttachment(sampleSheet, "text/plain", tsv.getBytes("UTF-8"))
-runIssue.addAttachment(attachment)
-case class SampleResultRow(sampleName: String, sampleId: Int)
-rows.map(issueManager.createRelation(runIssue.getId, _.sampleId, "blocks")) // right order?
-*/
-}
+  def getConfig() = "config.yaml".toFile.contentAsString.parseYaml.convertTo[Config]
+  def run(args: PostRunArgs): Unit = {
+    val cfg = getConfig()
+    val ssPath = args.runDir / "SampleSheet.csv"
+    if (!ssPath.exists()) throw new Exception(f"No sample sheet found in directory ${args.runDir}")
+
+    val mgr = RedmineManagerFactory.createWithApiKey(cfg.url, cfg.api_key)
+    val result = for {
+      runIssue <- uploadSampleSheet(mgr, args, ssPath)
+      rows <- eitherToDisjunct(getSheetRows(ssPath))
+      _ <- relateSampleSheetIssues(mgr, runIssue, rows)
+      _ <- fileProcesses(args, cfg).leftMap(new Exception(_))
+      result3 <- toReadsBySample(cfg, rows, args)
+    } yield result3
+    result match {
+      case (\/-(files)) => files.foreach(f => println(s"successfully created $f"))
+      case (-\/(error)) => throw error
+    }
+    //println("done")
+  }
+
+  def attachFile(issue: Issue, mgr: RedmineManager, file: File): Throwable\/Attachment = {
+    val attachment = mgr.getAttachmentManager.uploadAttachment("text/plain", file.toJava)
+    issue.addAttachment(attachment)
+    //runIssue.addCustomField(mgr.getCustomFieldManager.get)
+    Try({ mgr.getIssueManager.update(issue); attachment }).toDisjunction
+  }
+  def uploadSampleSheet(mgr: RedmineManager, args: PostRunArgs, sampleSheet: File): Throwable\/Issue = {
+    val runIssue = mgr.getIssueManager.getIssueById(args.runIssue)
+    val _ = attachFile(runIssue, mgr, sampleSheet)
+    \/.right(runIssue) // or is this created after-the-fact? no, it has to be created by the tech, because we need sequencing progress notifications
+  }
+  def relateSampleSheetIssues(mgr: RedmineManager, runIssue: Issue, rows: List[SampleSheetRow]): Throwable\/List[IssueRelation] = {
+    rows.map(row => Try(mgr.getIssueManager.createRelation(runIssue.getId, row.sampleName, "blocks")).toDisjunction).sequenceU
+  }
+
+type Error = String
+
 def fileProcesses(args: PostRunArgs, cfg: Config): Error\/List[File]  = {
-  args.runDir.toFile.copyTo(cfg.ngs_data / "RawData" / "MiSeq", overwrite = false)
+  args.runDir.toFile.copyTo(cfg.ngs_data / "RawData" / "MiSeq" / args.runDir.toFile.name, overwrite = false)
   val fastqDir = args.runDir/"Data/Intensities/BaseCalls"
   val readDataDir = cfg.ngs_data / "ReadData" / "MiSeq" / args.runDir
   readDataDir.createDirectory()
@@ -98,14 +123,17 @@ def fileProcesses(args: PostRunArgs, cfg: Config): Error\/List[File]  = {
   }).sequenceU
   renames.map(_.join)
 }
-def toReadsBySample(cfg: Config, rows: List[SampleSheetRow], readData: File): Throwable\/List[File] =
+def toReadsBySample(cfg: Config, rows: List[SampleSheetRow], args: PostRunArgs): Throwable\/List[File] = {
+  val readData = cfg.ngs_data / "ReadData" / "MiSeq" / args.runDir
   rows.map(row => {
     val issueDir = cfg.ngs_data / "ReadsBySample" / row.sampleName.toString
     for {
-      _ <-  Try(issueDir.createIfNotExists(asDirectory = true)).toDisjunction
+      _ <- Try(issueDir.createIfNotExists(asDirectory = true)).toDisjunction
       sources = readData.glob(s"${row.sampleName}_S_*.fastq").toList
-      res <- sources.map(src =>  Try(src.symbolicLinkTo(issueDir / src.name)).toDisjunction).sequenceU
-  } yield res }).sequenceU.map(_.join)
+      res <- sources.map(src => Try(src.symbolicLinkTo(issueDir / src.name)).toDisjunction).sequenceU
+    } yield res
+  }).sequenceU.map(_.join)
+}
 
 }
 
