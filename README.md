@@ -1,4 +1,4 @@
-
+### Scala-Sync
 
 
 The software creates the run issue and relates the samples. [we would want a verification step here.] run happens. A new script runs locally, trusts the Miseq filenames (no interaction w/ redmine), puts them into ReadData and then by folder into ReadsBySample
