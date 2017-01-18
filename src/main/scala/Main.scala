@@ -58,69 +58,54 @@ object Bleh {
     val ssPath = "/Users/mikep/scala/attemptscala" / "SampleSheet.csv"
     getSheetRows(ssPath).right.get
   }
-  def processSampleNames(file: java.io.File): Try[Unit] = {
-    val uri = "https://www.vdbpm.org"
-    val apiKey = "NOTHING"
-
-    case class SampleSheetRow (sampleId: String, sampleName: String)
-    val mgr = RedmineManagerFactory.createWithApiKey (uri, apiKey)
-    val issues = mgr.getIssueManager ().getIssues ("vdbsequencing", null)
-
-    val xs = issues.iterator.toList.take (4)
-    val issue = xs.head
-    //issue.getCustomFieldByName ("SampleList")
-    val sampleNames = List ("test-run")
-    val searchSubject = (n: String) => mgr.getIssueManager.getIssues (Map (("subject", n) ) )
-    val sampleProject = mgr.getProjectManager.getProjectByKey ("samples");
-    def searchOrCreate(name: String): Issue = {
-      val results = searchSubject (name).getResults
-      assert (results.length <= 1)
-      if (results.nonEmpty) results.head
-      else {
-      val issue = IssueFactory.create (sampleProject.getId (), name);
-      mgr.getIssueManager.createIssue (issue)
-      issue
-  }
-  }
-    val existingIssues = sampleNames.map (searchSubject)
-    // for each samplename, look up sample issues by subject
-    Try(())
-  }
   type Error = String
-
-  def fileProcesses(args: PostRunArgs, cfg: Config): Error\/List[File]  = {
-    args.runDir.toFile.copyTo(cfg.ngs_data / "RawData" / "MiSeq", overwrite = false)
-    val fastqDir = args.runDir/"Data/Intensities/BaseCalls"
-    val readDataDir = cfg.ngs_data / "ReadData" / "MiSeq" / args.runDir
-    readDataDir.createDirectory()
-    for (gz <- fastqDir.list) {
-      gz.unzipTo(readDataDir / gz.nameWithoutExtension) // does nameWithoutExtension really work?
-    }
-    /// but First! rename files in readdata to include the sampleName.
-    val ssPath = args.runDir / "SampleSheet.csv"
-    val rows = getSheetRows(ssPath).right.get
-    val renames = rows.zipWithIndex.map({ case (row: SampleSheetRow, idx: Int) => {
-      val sIndex = idx + 1
-      val files = fastqDir.glob(f"${row.sampleName}_S${sIndex}_*.fastq").toList // can be multiple, i.e. R1, R2! .headOption.toRight(f"Missing Sample for ID ${row.sampleId}")
-      if (files.length != 4) \/.left(s"Glob for ${row.sampleName} failed with results: ${files}")
-      else files.map(file =>
-        for {
-          basename <- file.nameOption.toRightDisjunction(f"Bad filename has no basename: $file")
-          newBaseName = basename.replaceFirst("\\.fastq", row.sampleId) ++ ".fastq": String
-          result <- Try(file.renameTo((readDataDir / newBaseName).toString)).toDisjunction.leftMap(_.getMessage)
-        } yield result).sequenceU
-    }
-    }).sequenceU
-    renames.map(_.join)
+  def uploadSampleSheet(mgr: RedmineManager, args: PostRunArgs, sampleSheet: File) = {
+/*
+val vdbSequencingProject = mgr.getProjectManager.getProjectByKey("vdb sequencing") // throws Redmine...
+//val runIssue = IssueFactory.create(vdbSequencingProject.getId, RUNNAME)
+val runIssue = mgr.getIssueManager.getIssueById(args.runIssue)
+// args.runDir is absolute path
+val sampleSheet = args.runDir/"SampleSheet.csv"
+if (!sampleSheet.exists()) Try(throw new Exception(f"No sample sheet found in directory ${args.runName}"))
+val attachment = mgr.getAttachmentManager.uploadAttachment(sampleSheet, "text/plain", tsv.getBytes("UTF-8"))
+runIssue.addAttachment(attachment)
+case class SampleResultRow(sampleName: String, sampleId: Int)
+rows.map(issueManager.createRelation(runIssue.getId, _.sampleId, "blocks")) // right order?
+*/
+}
+def fileProcesses(args: PostRunArgs, cfg: Config): Error\/List[File]  = {
+  args.runDir.toFile.copyTo(cfg.ngs_data / "RawData" / "MiSeq", overwrite = false)
+  val fastqDir = args.runDir/"Data/Intensities/BaseCalls"
+  val readDataDir = cfg.ngs_data / "ReadData" / "MiSeq" / args.runDir
+  readDataDir.createDirectory()
+  for (gz <- fastqDir.list) {
+    gz.unzipTo(readDataDir / gz.nameWithoutExtension) // does nameWithoutExtension really work?
   }
-  def toReadsBySample(cfg: Config, rows: List[SampleSheetRow], readData: File): Throwable\/List[File] =
-    rows.map(row => {
-      val issueDir = cfg.ngs_data / "ReadsBySample" / row.sampleName.toString
+  /// but First! rename files in readdata to include the sampleName.
+  val ssPath = args.runDir / "SampleSheet.csv"
+  val rows = getSheetRows(ssPath).right.get
+  val renames = rows.zipWithIndex.map({ case (row: SampleSheetRow, idx: Int) => {
+    val sIndex = idx + 1
+    val files = fastqDir.glob(f"${row.sampleName}_S${sIndex}_*.fastq").toList // can be multiple, i.e. R1, R2! .headOption.toRight(f"Missing Sample for ID ${row.sampleId}")
+    if (files.length != 4) \/.left(s"Glob for ${row.sampleName} failed with results: ${files}")
+    else files.map(file =>
       for {
-        _ <-  Try(issueDir.createIfNotExists(asDirectory = true)).toDisjunction
-        sources = readData.glob(s"${row.sampleName}_S_*.fastq").toList
-        res <- sources.map(src =>  Try(src.symbolicLinkTo(issueDir / src.name)).toDisjunction).sequenceU
-    } yield res }).sequenceU.map(_.join)
+        basename <- file.nameOption.toRightDisjunction(f"Bad filename has no basename: $file")
+        newBaseName = basename.replaceFirst("\\.fastq", row.sampleId) ++ ".fastq": String
+        result <- Try(file.renameTo((readDataDir / newBaseName).toString)).toDisjunction.leftMap(_.getMessage)
+      } yield result).sequenceU
+  }
+  }).sequenceU
+  renames.map(_.join)
+}
+def toReadsBySample(cfg: Config, rows: List[SampleSheetRow], readData: File): Throwable\/List[File] =
+  rows.map(row => {
+    val issueDir = cfg.ngs_data / "ReadsBySample" / row.sampleName.toString
+    for {
+      _ <-  Try(issueDir.createIfNotExists(asDirectory = true)).toDisjunction
+      sources = readData.glob(s"${row.sampleName}_S_*.fastq").toList
+      res <- sources.map(src =>  Try(src.symbolicLinkTo(issueDir / src.name)).toDisjunction).sequenceU
+  } yield res }).sequenceU.map(_.join)
 
 }
 
