@@ -13,6 +13,9 @@ libraryDependencies += "org.scalafx" %% "scalafx" % "8.0.102-R11"
 
 libraryDependencies += "com.nrinaudo" %% "kantan.csv" % "0.1.16"
 
+libraryDependencies += "com.nrinaudo" %% "kantan.csv-scalaz" % "0.1.16"
+
+
 // Automatic type class instances derivation.
 libraryDependencies += "com.nrinaudo" %% "kantan.csv-generic" % "0.1.16"
 
